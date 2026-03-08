@@ -104,29 +104,51 @@ public class CoverageParser {
     
     // Helper method to find jacoco.xml in a directory
     private File findJacocoXml(File directory) {
-        // Look for jacoco.xml file in directory
-        File[] files = directory.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                if (file.getName().equalsIgnoreCase("jacoco.xml")) {
-                    return file;
-                }
+        // Look for jacoco.xml file in directory and its subdirectories
+        return findFileRecursively(directory, "jacoco.xml");
+    }
+    
+    /**
+     * Recursively finds a file with the given name in the directory tree starting from baseDir
+     */
+    private File findFileRecursively(File baseDir, String fileName) {
+        return findFileRecursively(baseDir, fileName, true); // Default to case-insensitive
+    }
+    
+    /**
+     * Recursively finds a file with the given name in the directory tree starting from baseDir
+     * @param baseDir The directory to search in
+     * @param fileName The name of the file to find
+     * @param caseInsensitive Whether to perform case-insensitive matching
+     */
+    private File findFileRecursively(File baseDir, String fileName, boolean caseInsensitive) {
+        if (baseDir == null || !baseDir.isDirectory()) {
+            return null;
+        }
+        
+        File[] files = baseDir.listFiles();
+        if (files == null) return null;
+        
+        for (File file : files) {
+            boolean matches;
+            if (caseInsensitive) {
+                matches = file.getName().equalsIgnoreCase(fileName);
+            } else {
+                matches = file.getName().equals(fileName);
             }
             
-            // If jacoco.xml is not found, try looking in subdirectories
-            for (File file : files) {
-                if (file.isDirectory()) {
-                    File[] subFiles = file.listFiles();
-                    if (subFiles != null) {
-                        for (File subFile : subFiles) {
-                            if (subFile.getName().equalsIgnoreCase("jacoco.xml")) {
-                                return subFile;
-                            }
-                        }
-                    }
+            if (matches && file.isFile()) {
+                return file;
+            }
+            
+            if (file.isDirectory()) {
+                File found = findFileRecursively(file, fileName, caseInsensitive);
+                if (found != null) {
+                    return found;
                 }
             }
         }
+        
         return null;
     }
     
@@ -212,22 +234,30 @@ public class CoverageParser {
         return coverageMap;
     }
     
+    // Helper method to get counter values by type
+    private int[] getCounterValues(Element classElement, String type) {
+        List<Element> counterElements = classElement.elements("counter");
+        int covered = 0;
+        int missed = 0;
+        
+        for (Element counterElement : counterElements) {
+            if (type.equals(counterElement.attributeValue("type"))) {
+                covered = Integer.parseInt(counterElement.attributeValue("covered", "0"));
+                missed = Integer.parseInt(counterElement.attributeValue("missed", "0"));
+                break;
+            }
+        }
+        
+        return new int[]{covered, missed};
+    }
+    
     // Helper method to identify pure interfaces with no executable code
     private boolean isPureInterfaceWithNoCoverage(Element classElement) {
         // Check if this class has 0 instructions covered and 0 missed
         // which typically indicates a pure interface with no executable code
-        List<Element> counterElements = classElement.elements("counter");
-        int instructionCovered = 0;
-        int instructionMissed = 0;
-        
-        for (Element counterElement : counterElements) {
-            String type = counterElement.attributeValue("type");
-            if ("INSTRUCTION".equals(type)) {
-                instructionCovered = Integer.parseInt(counterElement.attributeValue("covered", "0"));
-                instructionMissed = Integer.parseInt(counterElement.attributeValue("missed", "0"));
-                break;
-            }
-        }
+        int[] instructionValues = getCounterValues(classElement, "INSTRUCTION");
+        int instructionCovered = instructionValues[0];
+        int instructionMissed = instructionValues[1];
         
         // If there are no instructions at all (both covered and missed are 0),
         // this likely indicates a pure interface with no executable code
@@ -264,9 +294,8 @@ public class CoverageParser {
         return coverageMap.entrySet().stream()
             .filter(entry -> entry.getKey().toLowerCase().contains(className.toLowerCase()))
             .filter(entry -> !isDaoClass(entry.getKey())) // Exclude DAO classes
-            .filter(entry -> !(entry.getValue().instructionCoverage == 0.0 && 
-                              entry.getValue().lineCoverage == 0.0 &&
-                              entry.getValue().methodCoverage == 0.0)) // Exclude pure interfaces
+            .filter(entry -> !(entry.getValue().instructionCovered == 0 && 
+                              entry.getValue().instructionMissed == 0)) // Exclude classes with no executable code at all
             .map(entry -> entry.getValue())
             .collect(Collectors.toList());
     }
@@ -279,60 +308,78 @@ public class CoverageParser {
         
         // Handle different path formats
         File reportFile = new File(reportPath);
-        String basePath;
+        String sourceSearchDir;
         
         if (reportFile.isDirectory()) {
-            // If reportPath is a directory, use it as base
-            basePath = reportFile.getAbsolutePath();
+            // If reportPath is a directory, look for source files in the same directory
+            // For the path like D:\IdeaProjects\attendance-system\backend\target\site\jacoco
+            // We now search directly in D:\IdeaProjects\attendance-system\backend\target\site\jacoco
+            sourceSearchDir = reportFile.getAbsolutePath();
         } else {
-            // If reportPath is a file, use its parent directory
-            basePath = reportFile.getParent();
+            // If reportPath is a file (like jacoco.xml), use its parent directory
+            String parentPath = reportFile.getParent();
+            if (parentPath != null) {
+                sourceSearchDir = parentPath;
+            } else {
+                return null;
+            }
         }
         
-        if (basePath == null) return null;
+        if (sourceSearchDir == null) return null;
         
         // Convert package name to directory path
         String packageDir = info.fullClassName.substring(0, info.fullClassName.lastIndexOf('.')).replace('.', '/');
         
-        // Try different common source directory structures relative to the base path
-        String[] sourcePaths = {
-            basePath + "/../../src/main/java/" + packageDir + "/" + info.sourceFileName,  // Go up two levels from report dir
-            basePath + "/../src/main/java/" + packageDir + "/" + info.sourceFileName,    // Go up one level from report dir
-            basePath + "/src/main/java/" + packageDir + "/" + info.sourceFileName,       // Direct src in base
-            basePath + "/../../src/test/java/" + packageDir + "/" + info.sourceFileName,
-            basePath + "/../src/test/java/" + packageDir + "/" + info.sourceFileName,
-            basePath + "/src/test/java/" + packageDir + "/" + info.sourceFileName,
-            basePath + "/../../src/java/" + packageDir + "/" + info.sourceFileName,
-            basePath + "/../src/java/" + packageDir + "/" + info.sourceFileName,
-            basePath + "/src/java/" + packageDir + "/" + info.sourceFileName,
-            basePath + "/" + packageDir + "/" + info.sourceFileName,  // Try package path directly
-            basePath + "/" + info.sourceFileName  // Try just filename in base
-        };
+        // First, try to find the regular .java source file
+        File baseDir = new File(sourceSearchDir);
+        File sourceFile = searchForSourceFileInDir(baseDir, packageDir, info.sourceFileName);
+        if (sourceFile != null) {
+            return sourceFile;
+        }
         
-        for (String path : sourcePaths) {
-            File sourceFile = new File(path);
+        // If not found, try to find the .java.html file (JaCoCo HTML report format)
+        String htmlSourceFileName = info.sourceFileName + ".html";
+        sourceFile = searchForSourceFileInDir(baseDir, packageDir, htmlSourceFileName);
+        if (sourceFile != null) {
+            return sourceFile;
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Searches for the source file in the specified directory
+     * following the package structure
+     */
+    private File searchForSourceFileInDir(File baseDir, String packageDir, String sourceFileName) {
+        if (baseDir == null || !baseDir.exists() || !baseDir.isDirectory()) {
+            return null;
+        }
+        
+        // Look for the source file in the expected package directory structure
+        File expectedPackageDir = new File(baseDir, packageDir);
+        if (expectedPackageDir.exists() && expectedPackageDir.isDirectory()) {
+            File sourceFile = new File(expectedPackageDir, sourceFileName);
             if (sourceFile.exists()) {
                 return sourceFile;
             }
         }
         
-        // Additional fallback: if we know the project name from the path, try to construct path
-        String projectPath = findProjectRoot(basePath);
-        if (projectPath != null) {
-            String[] altPaths = {
-                projectPath + "/src/main/java/" + packageDir + "/" + info.sourceFileName,
-                projectPath + "/src/test/java/" + packageDir + "/" + info.sourceFileName
-            };
-            
-            for (String path : altPaths) {
-                File sourceFile = new File(path);
-                if (sourceFile.exists()) {
-                    return sourceFile;
-                }
-            }
+        // Also try to find the file recursively in subdirectories under the base directory
+        File foundFile = findFileRecursivelyFromBase(baseDir, sourceFileName);
+        if (foundFile != null) {
+            return foundFile;
         }
         
         return null;
+    }
+    
+    /**
+     * Recursively finds a file with the given name in the directory tree starting from baseDir
+     * This method is kept for backward compatibility and handles case-sensitive file name matching
+     */
+    private File findFileRecursivelyFromBase(File baseDir, String fileName) {
+        return findFileRecursively(baseDir, fileName, false); // Case sensitive by default
     }
     
     // Helper method to try to find project root
