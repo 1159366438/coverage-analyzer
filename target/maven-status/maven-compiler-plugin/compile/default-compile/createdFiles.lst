@@ -1,0 +1,4 @@
+com\example\coverageanalyzer\SimpleCoverageAnalyzer.class
+com\example\coverageanalyzer\CoverageParser.class
+com\example\coverageanalyzer\MainApp.class
+com\example\coverageanalyzer\CoverageParser$CoverageInfo.class
